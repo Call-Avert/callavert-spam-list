@@ -1,0 +1,99 @@
+name: Rebuild spam list
+
+# Weekly, matching what the app does: the phone fetches this file about once a
+# week, so publishing more often would spend GitHub minutes to change a file
+# nobody reads any sooner.
+#
+# Monday 06:00 UTC — after the FTC has posted Friday's and the weekend's data,
+# which it folds into the first business day's file.
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:          # so it can be run by hand without waiting a week
+
+permissions:
+  contents: write             # to commit the rebuilt list and store the history
+
+concurrency:
+  # Two runs at once would both load the same history, each add the new files to
+  # their own copy, and the second push would discard the first — losing a week
+  # of accumulated counts silently.
+  group: rebuild-list
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The history is the state that makes a number survive going quiet, and
+      # the .sources sidecar is what stops the same file being counted twice.
+      # Both are kept as release assets rather than committed: the history grows
+      # to tens of megabytes and committing it weekly would bloat the repository
+      # for data nobody needs the past versions of.
+      - name: Restore history
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p state
+          if gh release download list-state --pattern 'spam-history.*' --dir state 2>/dev/null; then
+            gunzip -f state/spam-history.csv.gz || true
+            echo "restored history: $(wc -l < state/spam-history.csv) rows"
+          else
+            echo "no previous history — starting fresh"
+          fi
+
+      - name: Fetch the FTC daily files
+        run: python tools/fetch_ftc_files.py --out ftcdata
+
+      - name: Rebuild the list
+        run: |
+          python tools/build_spam_list.py \
+            --input "ftcdata/*.csv" \
+            --out spam/current.csv.gz \
+            --history state/spam-history.csv \
+            --min-reports 2 \
+            --retain-days 120
+
+      # An empty or absurdly small list would wipe protection for every user on
+      # their next fetch. The builder already refuses to write nothing; this is
+      # the second gate, because a bad publish cannot be recalled once devices
+      # have taken it.
+      - name: Sanity-check before publishing
+        run: |
+          COUNT=$(gunzip -c spam/current.csv.gz | grep -vc '^#')
+          echo "list holds $COUNT numbers"
+          if [ "$COUNT" -lt 500 ]; then
+            echo "::error::Only $COUNT numbers — refusing to publish a list this small."
+            exit 1
+          fi
+
+      - name: Publish
+        run: |
+          git config user.name  "callavert-list-bot"
+          git config user.email "contact@callavert.com"
+          git add spam/current.csv.gz
+          if git diff --cached --quiet; then
+            echo "list unchanged — nothing to publish"
+          else
+            COUNT=$(gunzip -c spam/current.csv.gz | grep -vc '^#')
+            git commit -m "Rebuild: $COUNT numbers ($(date -u +%Y-%m-%d))"
+            git push
+          fi
+
+      - name: Store history for the next run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gzip -kf state/spam-history.csv
+          gh release view list-state >/dev/null 2>&1 || \
+            gh release create list-state --title "List builder state" --notes \
+              "Working state for the weekly rebuild. Not part of the published list."
+          gh release upload list-state \
+            state/spam-history.csv.gz \
+            state/spam-history.csv.sources --clobber
