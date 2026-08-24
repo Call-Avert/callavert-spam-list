@@ -66,7 +66,7 @@ public domain. This compilation is published under
 
 ## How it stays current
 
-A GitHub Action rebuilds this file **every Monday at 06:00 UTC**
+A GitHub Action rebuilds this file **every day at 06:00 UTC**
 (`.github/workflows/rebuild-list.yml`). It downloads the FTC's daily complaint
 files, folds them into a running history, and commits the result.
 

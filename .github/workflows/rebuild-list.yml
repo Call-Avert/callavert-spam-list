@@ -8,7 +8,15 @@ name: Rebuild spam list
 # which it folds into the first business day's file.
 on:
   schedule:
-    - cron: "0 6 * * 1"
+    # DAILY. This was weekly, which quietly broke the retention promise: a
+    # number meant to be released after 14 days could sit on a phone for close
+    # to four weeks once a weekly rebuild and a weekly device fetch stacked up.
+    # The tier that suffers most is the one-report tier - the entries most
+    # likely to be an innocent number somebody spoofed.
+    #
+    # 06:00 UTC is after the FTC's overnight publish and before most of the US
+    # wakes up.
+    - cron: "0 6 * * *"
   workflow_dispatch:          # so it can be run by hand without waiting a week
 
 permissions:
@@ -62,8 +70,27 @@ jobs:
       # A silently missing tier would not trip either size gate on its own,
       # because the list would still look plausibly large - so the fetch has to
       # be right rather than merely non-empty.
+      # Keep the downloaded files between runs. Without this a daily job
+      # would pull the whole 120-day window - about 94 MB - off a government
+      # file server every morning to learn one new day. The fetcher skips
+      # anything already on disk, so a warm cache costs one file.
+      #
+      # The cache is an optimisation only: the key changes every day and a miss
+      # simply re-downloads the window, which is exactly what the very first
+      # run does anyway.
+      - name: Cache the FTC files
+        uses: actions/cache@v4
+        with:
+          path: ftcdata
+          key: ftcdata-${{ github.run_id }}
+          restore-keys: ftcdata-
+
       - name: Fetch the FTC daily files
-        run: python tools/fetch_ftc_files.py --out ftcdata --backfill-days 120
+        run: |
+          python tools/fetch_ftc_files.py \
+            --out ftcdata \
+            --backfill-days 120 \
+            --keep-days 130
 
       - name: Rebuild the list
         run: |

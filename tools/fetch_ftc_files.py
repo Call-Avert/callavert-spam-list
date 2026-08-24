@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import glob
 import os
 import re
 import sys
@@ -59,6 +60,9 @@ def main() -> int:
     ap.add_argument("--backfill-days", type=int, default=0,
                     help="also walk back this many days by URL, past what the "
                          "page still lists (weekends are skipped)")
+    ap.add_argument("--keep-days", type=int, default=0,
+                    help="delete files in --out older than this many days "
+                         "(0 keeps everything)")
     ap.add_argument("--today", default=None, help="override today (YYYY-MM-DD)")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -114,6 +118,23 @@ def main() -> int:
             fh.write(data)
         fetched += 1
         print(f"  fetched {name} ({len(data):,} bytes)")
+
+    if args.keep_days > 0:
+        # Left alone, a cached download directory grows for ever and every run
+        # parses more files to reach the same answer - the builder would expire
+        # those numbers regardless. Prune by the date in the name rather than
+        # by mtime, which a cache restore rewrites to the time of the restore.
+        today = (datetime.date.fromisoformat(args.today) if args.today
+                 else datetime.date.today())
+        floor = (today - datetime.timedelta(days=args.keep_days)).isoformat()
+        removed = 0
+        for path in glob.glob(os.path.join(args.out, "*.csv")):
+            found = re.search(r"(20\d{2}-\d{2}-\d{2})", os.path.basename(path))
+            if found and found.group(1) < floor:
+                os.remove(path)
+                removed += 1
+        if removed:
+            print(f"pruned {removed} file(s) older than {floor}")
 
     print(f"\n{len(names)} wanted, {fetched} downloaded, {skipped} already "
           f"present, {len(missing)} not available")
