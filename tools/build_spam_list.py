@@ -363,14 +363,28 @@ def main() -> int:
     listed = [(n, h) for n, h in hist.items() if h["reports"] >= args.min_reports]
     listed.sort(key=lambda kv: (-kv[1]["reports"], kv[0]))
 
-    with gzip.open(args.out, "wt", encoding="utf-8", newline="\n") as out:
-        out.write("# Call Avert spam list\n")
-        out.write(f"# built {today.isoformat()} from FTC Do Not Call complaint data\n")
-        out.write(f"# listed at {args.min_reports}+ reports\n")
-        out.write(f"# dropped after {args.retain_1}d silent (1 report), "
-                  f"{args.retain_2}d (2), {args.retain_days}d (3+)\n")
-        for number, h in listed:
-            out.write(f"{number},{h['reports']},{h['subject']}\n")
+    body = io.StringIO()
+    body.write("# Call Avert spam list\n")
+    body.write(f"# built {today.isoformat()} from FTC Do Not Call complaint data\n")
+    body.write(f"# listed at {args.min_reports}+ reports\n")
+    body.write(f"# dropped after {args.retain_1}d silent (1 report), "
+               f"{args.retain_2}d (2), {args.retain_days}d (3+)\n")
+    for number, h in listed:
+        body.write(f"{number},{h['reports']},{h['subject']}\n")
+
+    # DETERMINISTIC OUTPUT. gzip stamps the current time and the source
+    # filename into its header by default, so two runs over identical data
+    # produce different bytes.
+    #
+    # That is not cosmetic here. The file is served from a CDN and fetched
+    # conditionally: devices send back the ETag they hold and expect a 304 when
+    # nothing has changed. Bytes that differ every run mean a new ETag every
+    # run, so every phone would re-download the whole list daily to arrive at
+    # exactly the data it already had - and the publish step would commit a
+    # "change" every day for the same reason.
+    with open(args.out, "wb") as fh:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=fh, mtime=0) as gz:
+            gz.write(body.getvalue().encode("utf-8"))
 
     save_history(args.history, hist)
     save_sources(args.history, seen_sources)

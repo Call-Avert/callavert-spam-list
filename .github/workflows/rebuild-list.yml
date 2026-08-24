@@ -140,15 +140,35 @@ jobs:
             exit 1
           fi
 
+      # Publish only when the NUMBERS changed.
+      #
+      # Comparing the whole file would republish every single day, because the
+      # header carries the build date. That is not just commit noise: the file
+      # is fetched conditionally, so a new byte anywhere means a new ETag, and
+      # every device would re-download the entire list to end up with exactly
+      # the data it already had. On a weekend, when the FTC publishes nothing,
+      # that is pure waste on someone's mobile plan.
+      #
+      # So the comparison ignores comment lines, and when the numbers match we
+      # restore the committed file rather than leaving the newly built one in
+      # the tree - keeping the published bytes, and their ETag, exactly as they
+      # were.
       - name: Publish
         run: |
           git config user.name  "callavert-list-bot"
           git config user.email "contact@callavert.com"
-          git add spam/current.csv.gz
-          if git diff --cached --quiet; then
-            echo "list unchanged — nothing to publish"
-          else
-            COUNT=$(gunzip -c spam/current.csv.gz | grep -vc '^#')
-            git commit -m "Rebuild: $COUNT numbers ($(date -u +%Y-%m-%d))"
-            git push
+
+          NEW=$(gunzip -c spam/current.csv.gz | grep -v '^#' | sha256sum | cut -d' ' -f1)
+          OLD=$(git show HEAD:spam/current.csv.gz 2>/dev/null \
+                | gunzip -c 2>/dev/null | grep -v '^#' | sha256sum | cut -d' ' -f1)
+
+          if [ "$NEW" = "$OLD" ]; then
+            git checkout -- spam/current.csv.gz
+            echo "numbers unchanged — keeping the published file and its ETag"
+            exit 0
           fi
+
+          COUNT=$(gunzip -c spam/current.csv.gz | grep -vc '^#')
+          git add spam/current.csv.gz
+          git commit -m "Rebuild: $COUNT numbers ($(date -u +%Y-%m-%d))"
+          git push
