@@ -75,9 +75,15 @@ jobs:
       # file server every morning to learn one new day. The fetcher skips
       # anything already on disk, so a warm cache costs one file.
       #
-      # The cache is an optimisation only: the key changes every day and a miss
-      # simply re-downloads the window, which is exactly what the very first
-      # run does anyway.
+      # The cache is an optimisation only, and --keep-days is set to the SAME
+      # window as --backfill-days to keep it one. Retaining more than is
+      # fetched lets the cache accumulate files a cold run would never
+      # download: the fetch walks back 120 days, so a file that ages past 120
+      # is kept but never re-fetched. Those extra days still feed the builder
+      # and still raise report counts, so a cache-miss run and a cache-hit run
+      # would publish different lists - the same order-dependence that carrying
+      # history caused, arriving by another route. Equal windows mean every run
+      # sees exactly [today-120, today], warm or cold.
       - name: Cache the FTC files
         uses: actions/cache@v4
         with:
@@ -90,7 +96,7 @@ jobs:
           python tools/fetch_ftc_files.py \
             --out ftcdata \
             --backfill-days 120 \
-            --keep-days 130
+            --keep-days 120
 
       - name: Rebuild the list
         run: |
