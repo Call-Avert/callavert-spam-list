@@ -55,8 +55,19 @@ jobs:
       - name: Test the compiler
         run: python -m unittest discover -s tools -p "test_*.py"
 
+      # Fetch the WHOLE retention window, not just what the FTC page still
+      # links. The page lists about a month; retention runs to 120 days, so
+      # without the date walk the 2- and 3-report tiers could only fill at one
+      # day per day and the list sat at roughly a third of its true size.
+      #
+      # Re-fetching the full window every week also makes the build reproduce
+      # itself from nothing: if the saved history is ever lost, the next run
+      # rebuilds the same list from the files alone. The history below is then
+      # only an optimisation, not something correctness depends on - and a
+      # silently missing tier would not trip the size gates, because the list
+      # would still look plausibly large.
       - name: Fetch the FTC daily files
-        run: python tools/fetch_ftc_files.py --out ftcdata
+        run: python tools/fetch_ftc_files.py --out ftcdata --backfill-days 120
 
       - name: Rebuild the list
         run: |

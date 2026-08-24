@@ -39,6 +39,11 @@ The clock runs from the **most recent** report, so a number that keeps being
 reported keeps resetting it and stays listed while it is still in use. A second
 report promotes a number to the longer window immediately.
 
+The compiler fetches the **whole 120-day window** each run, not just the month
+the FTC page still links to - older daily files stay served after they stop
+being listed. Without that walk the 2- and 3-report tiers could only fill at
+one day per day, and the list sat at about a third of its true size.
+
 This replaced a flat rule that simply discarded anything under three reports —
 93% of the feed — which meant missing a spammer during exactly the days they
 were dialling. Expressing confidence as *time* rather than as exclusion keeps
