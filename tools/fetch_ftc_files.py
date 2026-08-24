@@ -3,10 +3,14 @@
 
     python fetch_ftc_files.py --out ftcdata
 
-The FTC links these from its data-sets page and keeps a rolling window of about
-24 of them, so anything older has to have been captured earlier - which is why
-build_spam_list.py keeps a running history rather than rebuilding from whatever
-is currently downloadable.
+The FTC links about 24 of these from its data-sets page - roughly a month. Older
+files stay served after they stop being linked, so --backfill-days walks back by
+date to reach them. That matters because retention runs to 120 days: without the
+walk the 2- and 3-report tiers could only fill at one day per day, and the list
+sat at about a third of its true size.
+
+Fetching the whole retention window every run also means the build reproduces
+itself from the files alone, with no state carried between runs.
 
 No API key. These are plain public files; the DNC API is unsuitable for bulk
 work because past the first page it serves a years-old backfill block, and its
