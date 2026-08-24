@@ -12,12 +12,12 @@ on:
   workflow_dispatch:          # so it can be run by hand without waiting a week
 
 permissions:
-  contents: write             # to commit the rebuilt list and store the history
+  contents: write             # to commit the rebuilt list
 
 concurrency:
-  # Two runs at once would both load the same history, each add the new files to
-  # their own copy, and the second push would discard the first — losing a week
-  # of accumulated counts silently.
+  # Two runs at once would race on the same branch and one push would discard
+  # the other's. Harmless now that each run recomputes the list from scratch,
+  # but a wasted rebuild and a confusing history.
   group: rebuild-list
   cancel-in-progress: false
 
@@ -31,23 +31,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      # The history is the state that makes a number survive going quiet, and
-      # the .sources sidecar is what stops the same file being counted twice.
-      # Both are kept as release assets rather than committed: the history grows
-      # to tens of megabytes and committing it weekly would bloat the repository
-      # for data nobody needs the past versions of.
-      - name: Restore history
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p state
-          if gh release download list-state --pattern 'spam-history.*' --dir state 2>/dev/null; then
-            gunzip -f state/spam-history.csv.gz || true
-            echo "restored history: $(wc -l < state/spam-history.csv) rows"
-          else
-            echo "no previous history — starting fresh"
-          fi
-
       # The compiler decides which numbers get blocked on other people's
       # phones, and nothing downstream would notice if it got that wrong: a
       # bad list looks exactly like a good one. Both failures it has had -
@@ -55,17 +38,30 @@ jobs:
       - name: Test the compiler
         run: python -m unittest discover -s tools -p "test_*.py"
 
+      # NO HISTORY IS CARRIED BETWEEN RUNS, deliberately.
+      #
+      # It used to be saved as a release asset, and that made the published
+      # list depend on the order runs had happened in: expiring a number from
+      # the history discarded the reports it had already absorbed, so days
+      # already marked "counted" could never contribute again. Rebuilding from
+      # the same files in a different order gave a different list - a 5%
+      # difference when this was found, with nothing to indicate which was
+      # right.
+      #
+      # Since every run now fetches the whole 120-day window, carrying history
+      # buys nothing: no number can outlive the window anyway, because the
+      # longest retention IS the window. Each run recomputes from the files
+      # alone, which is deterministic, needs no stored state, and repairs
+      # itself if anything upstream is ever lost.
+
       # Fetch the WHOLE retention window, not just what the FTC page still
       # links. The page lists about a month; retention runs to 120 days, so
       # without the date walk the 2- and 3-report tiers could only fill at one
       # day per day and the list sat at roughly a third of its true size.
       #
-      # Re-fetching the full window every week also makes the build reproduce
-      # itself from nothing: if the saved history is ever lost, the next run
-      # rebuilds the same list from the files alone. The history below is then
-      # only an optimisation, not something correctness depends on - and a
-      # silently missing tier would not trip the size gates, because the list
-      # would still look plausibly large.
+      # A silently missing tier would not trip either size gate on its own,
+      # because the list would still look plausibly large - so the fetch has to
+      # be right rather than merely non-empty.
       - name: Fetch the FTC daily files
         run: python tools/fetch_ftc_files.py --out ftcdata --backfill-days 120
 
@@ -74,7 +70,7 @@ jobs:
           python tools/build_spam_list.py \
             --input "ftcdata/*.csv" \
             --out spam/current.csv.gz \
-            --history state/spam-history.csv \
+            --history "$RUNNER_TEMP/history.csv" \
             --min-reports 1 \
             --retain-1 14 \
             --retain-2 45 \
@@ -123,15 +119,3 @@ jobs:
             git commit -m "Rebuild: $COUNT numbers ($(date -u +%Y-%m-%d))"
             git push
           fi
-
-      - name: Store history for the next run
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gzip -kf state/spam-history.csv
-          gh release view list-state >/dev/null 2>&1 || \
-            gh release create list-state --title "List builder state" --notes \
-              "Working state for the weekly rebuild. Not part of the published list."
-          gh release upload list-state \
-            state/spam-history.csv.gz \
-            state/spam-history.csv.sources --clobber
