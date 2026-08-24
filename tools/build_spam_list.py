@@ -41,6 +41,18 @@ WHY NOT KEEP NUMBERS FOREVER
   eventually blocking a stranger; the default is deliberately well past 45 days
   but not unbounded.
 
+RETENTION IS TIERED BY HOW MANY PEOPLE REPORTED IT
+
+  How long a number is kept depends on how well corroborated it is, because the
+  cost of being wrong differs so much between the two ends. A number reported
+  by one person gets a fortnight; by two, 45 days; by three or more, the full
+  retention. See RETAIN_BY_REPORTS.
+
+  This replaces an all-or-nothing threshold that deleted every number with
+  fewer than three reports - which was most of the feed. A short leash is a
+  better answer than a blindfold: it catches the number while it is likely
+  still dialling, and lets go quickly if the report was wrong.
+
 OUTPUT FORMAT (gzipped, one record per line)
 
     +14155551234,47,Warranties & Protection Plans
@@ -62,18 +74,42 @@ import os
 import re
 import sys
 
-# A number needs at least this many reports, in total across all runs, before
-# it is listed.
+# The floor: a number needs at least this many reports, in total across all
+# runs, before it is listed at all.
 #
-# The single most important number in this file. FTC data is UNVERIFIED
-# consumer reports and caller ID is routinely spoofed, so a number can appear
-# because a scammer forged it - the owner being an innocent party who would
-# then be blocked. One report is noise. Repeated reports from different people
-# are signal.
-DEFAULT_MIN_REPORTS = 3
+# This was 3, and it carried the entire risk judgement on its own - one report
+# was treated as pure noise and discarded forever. That is a blunt trade. FTC
+# data is UNVERIFIED and caller ID is routinely spoofed, so a lone report may
+# well be a scammer forging an innocent party's number. But 93% of reported
+# numbers have exactly one report, and throwing all of them away means missing
+# a spammer during the very window they are active.
+#
+# Confidence is now expressed as TIME rather than as exclusion (see
+# RETAIN_BY_REPORTS), so the floor can sit at 1 without treating a single
+# unverified report as though it were proven.
+DEFAULT_MIN_REPORTS = 1
 
-# Days of silence before a number is dropped. Well beyond the FCC's 45-day
-# reassignment floor is risky; well under it forgets spammers who pause.
+# How long a number stays listed after its LAST report, keyed by how many
+# people reported it. Confidence and dwell time are tied together on purpose.
+#
+#   1 report    14 days  Caught while it is probably still live, and released
+#                        quickly if it was a spoofed innocent line. Two weeks
+#                        of wrongly blocking somebody is a real cost, but a
+#                        bounded and short one.
+#   2 reports   45 days  Corroborated by a second stranger. Lands on the FCC's
+#                        reassignment floor, so the number is very unlikely to
+#                        have been handed to anyone new yet.
+#   3+ reports  full     A pattern, not a coincidence: DEFAULT_RETAIN_DAYS.
+#
+# The clock runs from the LAST report, not the first, so a number that keeps
+# being reported keeps resetting its own timer and never ages out while it is
+# still in use. A one-report number that draws a second report is promoted to
+# the longer tier at once, dated from that newer report.
+RETAIN_BY_REPORTS = {1: 14, 2: 45}
+
+# Days of silence before a well-corroborated (3+) number is dropped. Well
+# beyond the FCC's 45-day reassignment floor is risky; well under it forgets
+# spammers who pause.
 DEFAULT_RETAIN_DAYS = 120
 
 NUMBER_COLUMNS = (
@@ -97,17 +133,53 @@ HISTORY_FIELDS = ["number", "first_seen", "last_seen", "reports", "subject"]
 # "everything ever reported once", which is the exact outcome the threshold
 # exists to prevent, and nothing would have looked broken.
 #
-# Files are identified by content hash, not name: the FTC revises a day's file
-# in place when late reports arrive, and a revised file SHOULD be re-read.
+# Files are identified by the DAY they cover, taken from the filename.
+#
+# Neither obvious alternative is safe, because an FTC row carries no report ID
+# and so cannot be recognised as one already counted:
+#
+#   By name alone - a day republished under a new name is counted twice.
+#   By content    - the FTC revises a day's file in place when late reports
+#                   arrive. Re-reading the revision counts every row it shares
+#                   with the version already ingested, inflating those numbers
+#                   a second time.
+#
+# Keying on the day is exact: each day contributes exactly once, whatever the
+# file is called and however often it is revised or re-downloaded. The cost is
+# that reports added to a day after it was first ingested are missed. That is a
+# small, bounded UNDER-count, and under-counting is the safe direction - it can
+# only shorten how long a number stays listed, never extend it. A persistent
+# caller shows up on later days regardless.
+#
+# Files with no recognisable date fall back to a content hash, which at least
+# makes a straight re-run idempotent.
 STATE_SUFFIX = ".sources"
+FILE_DATE = re.compile(r"(20\d{2}-\d{2}-\d{2})")
 
 
 def load_sources(history_path: str) -> set[str]:
+    """Read the already-counted set, upgrading entries written by older runs.
+
+    Without the upgrade, the first run after a key change treats every file it
+    has already ingested as new and doubles every count in the current window -
+    precisely the bug this state file exists to prevent.
+    """
     try:
         with io.open(history_path + STATE_SUFFIX, encoding="utf-8") as fh:
-            return {line.strip() for line in fh if line.strip()}
+            raw = [line.strip() for line in fh if line.strip()]
     except FileNotFoundError:
         return set()
+
+    seen = set()
+    for entry in raw:
+        if entry.startswith("day:") or entry.startswith("sha:"):
+            seen.add(entry)
+            continue
+        # Legacy "basename:hash". The basename carries the date we now key on.
+        found = FILE_DATE.search(entry)
+        seen.add(f"day:{found.group(1)}" if found
+                 else "sha:" + entry.rsplit(":", 1)[-1])
+    return seen
 
 
 def save_sources(history_path: str, seen: set[str]) -> None:
@@ -117,13 +189,15 @@ def save_sources(history_path: str, seen: set[str]) -> None:
 
 
 def file_fingerprint(path: str) -> str:
-    """Content hash plus basename, so a revised file is re-read but an
-    unchanged one is skipped however it was named on disk."""
+    """Identify which day's reports this file carries. See STATE_SUFFIX."""
+    found = FILE_DATE.search(os.path.basename(path))
+    if found:
+        return f"day:{found.group(1)}"
     h = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
-    return f"{os.path.basename(path)}:{h.hexdigest()[:16]}"
+    return "sha:" + h.hexdigest()[:32]
 
 
 def to_e164(raw: str) -> str | None:
@@ -186,14 +260,29 @@ def main() -> int:
                     help="running record of every number ever seen; not published")
     ap.add_argument("--min-reports", type=int, default=DEFAULT_MIN_REPORTS)
     ap.add_argument("--retain-days", type=int, default=DEFAULT_RETAIN_DAYS,
-                    help="drop a number after this many days with no new report")
+                    help="days of silence before a 3+ report number is dropped")
+    ap.add_argument("--retain-1", type=int, default=RETAIN_BY_REPORTS[1],
+                    help="days of silence before a ONE-report number is dropped")
+    ap.add_argument("--retain-2", type=int, default=RETAIN_BY_REPORTS[2],
+                    help="days of silence before a TWO-report number is dropped")
     ap.add_argument("--today", default=None, help="override today's date (YYYY-MM-DD)")
     args = ap.parse_args()
 
     today = (datetime.date.fromisoformat(args.today) if args.today
              else datetime.date.today())
 
-    paths = sorted(glob.glob(args.input))
+    # A glob such as "data/*.csv" will happily match the history file if it
+    # sits in the same directory, and the history would then be parsed as if
+    # it were FTC input. Exclude our own working files by identity, not by
+    # name, so a relative and an absolute path to the same file both match.
+    ours = set()
+    for candidate in (args.history, args.history + STATE_SUFFIX, args.out):
+        try:
+            ours.add(os.path.realpath(candidate))
+        except OSError:
+            pass
+    paths = [p for p in sorted(glob.glob(args.input))
+             if os.path.realpath(p) not in ours]
     if not paths:
         raise SystemExit(f"No input files matched {args.input!r}")
 
@@ -253,11 +342,23 @@ def main() -> int:
     for number, counter in subjects.items():
         hist[number]["subject"] = counter.most_common(1)[0][0]
 
-    # Expire on SILENCE, not on falling out of whatever window was fed in.
-    cutoff = (today - datetime.timedelta(days=args.retain_days)).isoformat()
-    expired = [n for n, h in hist.items() if h["last_seen"] < cutoff]
+    # Expire on SILENCE, not on falling out of whatever window was fed in - and
+    # how much silence is forgiven depends on how well corroborated the number
+    # is. One report buys a fortnight; three or more buys four months.
+    #
+    # Bucketed rather than computed per number so this stays a single dict
+    # lookup per entry over a history running to hundreds of thousands of rows.
+    cutoffs = {
+        1: (today - datetime.timedelta(days=args.retain_1)).isoformat(),
+        2: (today - datetime.timedelta(days=args.retain_2)).isoformat(),
+        3: (today - datetime.timedelta(days=args.retain_days)).isoformat(),
+    }
+    expired = [n for n, h in hist.items()
+               if h["last_seen"] < cutoffs[min(h["reports"], 3)]]
     for n in expired:
         del hist[n]
+
+    tiers = collections.Counter(min(h["reports"], 3) for h in hist.values())
 
     listed = [(n, h) for n, h in hist.items() if h["reports"] >= args.min_reports]
     listed.sort(key=lambda kv: (-kv[1]["reports"], kv[0]))
@@ -265,8 +366,9 @@ def main() -> int:
     with gzip.open(args.out, "wt", encoding="utf-8", newline="\n") as out:
         out.write("# Call Avert spam list\n")
         out.write(f"# built {today.isoformat()} from FTC Do Not Call complaint data\n")
-        out.write(f"# listed at {args.min_reports}+ reports; dropped after "
-                  f"{args.retain_days} days with no new report\n")
+        out.write(f"# listed at {args.min_reports}+ reports\n")
+        out.write(f"# dropped after {args.retain_1}d silent (1 report), "
+                  f"{args.retain_2}d (2), {args.retain_days}d (3+)\n")
         for number, h in listed:
             out.write(f"{number},{h['reports']},{h['subject']}\n")
 
@@ -276,7 +378,10 @@ def main() -> int:
     print(f"input        {len(paths):>4} file(s), {skipped_files} already counted, "
           f"{new_reports:,} new usable reports ({unusable:,} unusable)")
     print(f"history      {known_before:>9,} numbers known before -> {len(hist):,} now")
-    print(f"expired      {len(expired):>9,} numbers silent for {args.retain_days}+ days")
+    print(f"expired      {len(expired):>9,} numbers past their retention")
+    print(f"  tier 1      {tiers[1]:>9,} one report    (kept {args.retain_1}d)")
+    print(f"  tier 2      {tiers[2]:>9,} two reports   (kept {args.retain_2}d)")
+    print(f"  tier 3      {tiers[3]:>9,} three or more (kept {args.retain_days}d)")
     print(f"LISTED       {len(listed):>9,} numbers with {args.min_reports}+ reports")
     if not listed:
         print("\nNOTHING LISTED - publishing this would wipe every user's list.",

@@ -48,6 +48,13 @@ jobs:
             echo "no previous history — starting fresh"
           fi
 
+      # The compiler decides which numbers get blocked on other people's
+      # phones, and nothing downstream would notice if it got that wrong: a
+      # bad list looks exactly like a good one. Both failures it has had -
+      # a retention off-by-one and a double-count - published cleanly.
+      - name: Test the compiler
+        run: python -m unittest discover -s tools -p "test_*.py"
+
       - name: Fetch the FTC daily files
         run: python tools/fetch_ftc_files.py --out ftcdata
 
@@ -57,19 +64,39 @@ jobs:
             --input "ftcdata/*.csv" \
             --out spam/current.csv.gz \
             --history state/spam-history.csv \
-            --min-reports 2 \
+            --min-reports 1 \
+            --retain-1 14 \
+            --retain-2 45 \
             --retain-days 120
 
-      # An empty or absurdly small list would wipe protection for every user on
-      # their next fetch. The builder already refuses to write nothing; this is
-      # the second gate, because a bad publish cannot be recalled once devices
-      # have taken it.
+      # A bad publish cannot be recalled once devices have fetched it, so the
+      # list has to clear two gates before it goes out.
+      #
+      # The absolute floor catches a catastrophic build - a fetch that returned
+      # nothing, a parser broken by a column rename.
+      #
+      # The proportional gate catches the quieter and likelier failure: a
+      # regression that shrinks the list without emptying it. Losing most of
+      # the list still leaves thousands of numbers, so a fixed floor would wave
+      # it straight through while most users silently lost most of their
+      # protection. Comparing against what is already published is what makes
+      # that visible. A genuine large drop needs a human to look, which is
+      # exactly the intent.
       - name: Sanity-check before publishing
         run: |
           COUNT=$(gunzip -c spam/current.csv.gz | grep -vc '^#')
-          echo "list holds $COUNT numbers"
+          PREV=$(git show HEAD:spam/current.csv.gz 2>/dev/null \
+                 | gunzip -c 2>/dev/null | grep -vc '^#' || true)
+          PREV=${PREV:-0}
+          echo "list holds $COUNT numbers (previously $PREV)"
+
           if [ "$COUNT" -lt 500 ]; then
             echo "::error::Only $COUNT numbers — refusing to publish a list this small."
+            exit 1
+          fi
+
+          if [ "$PREV" -gt 0 ] && [ "$((COUNT * 2))" -lt "$PREV" ]; then
+            echo "::error::$COUNT numbers is less than half the published $PREV — refusing to publish. Re-run manually if this drop is expected."
             exit 1
           fi
 
