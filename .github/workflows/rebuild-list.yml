@@ -17,7 +17,7 @@ on:
     # 06:00 UTC is after the FTC's overnight publish and before most of the US
     # wakes up.
     - cron: "0 6 * * *"
-  workflow_dispatch:          # so it can be run by hand without waiting a week
+  workflow_dispatch:          # so it can be run by hand without waiting for 06:00
 
 permissions:
   contents: write             # to commit the rebuilt list
